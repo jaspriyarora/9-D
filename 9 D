@@ -1,0 +1,221 @@
+#include <FreeRTOS.h>  // Must be included first
+#include <task.h>      // Other FreeRTOS components
+#include <croutine.h>
+#include <SPI.h>
+#include <WiFiNINA.h>
+#include <DHT.h>
+
+// Pin Definitions
+#define DHTPIN 2        // DHT22 sensor pin
+#define DHTTYPE DHT22   // DHT22 sensor type
+#define NTC_PIN A0      // NTC thermistor pin
+#define LED_RED 5       // red LED pin
+#define LED_ORANGE 6    // orange LED pin
+#define FSR_PIN A1      // FSR pin for bed occupancy
+
+// WiFi credentials
+const char ssid[] = "iPhone";
+const char pass[] = "1234jaspriya";
+
+// WiFi server
+WiFiServer server(80);
+
+// DHT sensor object
+DHT dht(DHTPIN, DHTTYPE);
+
+// Constants for NTC thermistor
+const float BETA = 3950;  // beta coefficient
+const float R0 = 10000;   // resistance at 25 degrees Celsius
+
+// Variables for sensor data
+float tempDHT = 0;
+float tempNTC = 0;
+int fsrValue = 0;
+
+// Task handles
+TaskHandle_t TaskWiFiConnectHandle;
+TaskHandle_t TaskSensorReadHandle;
+TaskHandle_t TaskClientCommunicationHandle;
+TaskHandle_t TaskFSRReadHandle;
+
+void setup() {
+  Serial.begin(9600);
+  Serial.println("System starting...");
+
+  dht.begin();
+
+  // Setup pins for LEDs and FSR
+  pinMode(LED_RED, OUTPUT);
+  pinMode(LED_ORANGE, OUTPUT);
+  pinMode(FSR_PIN, INPUT);  // Initialize FSR pin
+
+  // Create FreeRTOS tasks
+  if (xTaskCreate(TaskWiFiConnect, "WiFi Connect", 256, NULL, 2, &TaskWiFiConnectHandle) != pdPASS) {
+    Serial.println("Failed to create TaskWiFiConnect");
+  }
+
+  if (xTaskCreate(TaskSensorRead, "Sensor Read", 256, NULL, 2, &TaskSensorReadHandle) != pdPASS) {
+    Serial.println("Failed to create TaskSensorRead");
+  }
+
+  if (xTaskCreate(TaskClientCommunication, "Client Communication", 256, NULL, 1, &TaskClientCommunicationHandle) != pdPASS) {
+    Serial.println("Failed to create TaskClientCommunication");
+  }
+
+  if (xTaskCreate(TaskFSRRead, "FSR Read", 256, NULL, 2, &TaskFSRReadHandle) != pdPASS) {
+    Serial.println("Failed to create TaskFSRRead");
+  }
+
+  // Start the FreeRTOS scheduler
+  Serial.println("Starting FreeRTOS scheduler...");
+  vTaskStartScheduler();
+}
+
+void loop() {
+  // Empty, handled by FreeRTOS tasks
+}
+
+// Task 1: WiFi Connection
+void TaskWiFiConnect(void *pvParameters) {
+  (void) pvParameters;
+  Serial.println("WiFi Task Started");  // Task started message
+  connectToWiFi();
+  vTaskDelete(NULL);  // WiFi task ends after connection
+}
+
+// Task 2: Read Sensors (Temperature)
+void TaskSensorRead(void *pvParameters) {
+  (void) pvParameters;
+  for (;;) {
+    Serial.println("Reading Sensors...");  // Debugging task execution
+    readSensors();
+    vTaskDelay(2000 / portTICK_PERIOD_MS);  // Read sensors every 2 seconds
+  }
+}
+
+// Task 3: Client Communication
+void TaskClientCommunication(void *pvParameters) {
+  (void) pvParameters;
+  for (;;) {
+    Serial.println("Waiting for Clients...");  // Debugging task execution
+    WiFiClient client = server.available();  // Listen for incoming clients
+    if (client) {
+      Serial.println("Client Connected");
+      while (client.connected()) {
+        if (client.available()) {  // Read client's request
+          String request = client.readStringUntil('\r');
+          client.flush();
+
+          // Send the data to the client
+          client.println("DHT22 Temperature: " + String(tempDHT));
+          client.println("NTC Thermistor Temperature: " + String(tempNTC));
+          client.println("FSR Bed Occupancy: " + String(fsrValue > someThreshold ? "Occupied" : "Not Occupied"));
+          client.println("Orange LED: " + String(digitalRead(LED_ORANGE) ? "ON" : "OFF"));
+          client.println("Red LED: " + String(digitalRead(LED_RED) ? "ON" : "OFF"));
+
+          // Close the connection
+          client.stop();
+        }
+      }
+    }
+    vTaskDelay(1000 / portTICK_PERIOD_MS);  // Check for clients every 1 second
+  }
+}
+
+// Task 4: Read FSR (Bed Occupancy)
+void TaskFSRRead(void *pvParameters) {
+  (void) pvParameters;
+  for (;;) {
+    fsrValue = analogRead(FSR_PIN);  // Read FSR value
+    Serial.print("FSR Raw Value: ");
+    Serial.println(fsrValue);  // Log the value for debugging
+
+    // Check bed occupancy based on threshold
+    if (fsrValue > someThreshold) {
+      Serial.println("Bed Occupied");
+    } else {
+      Serial.println("Bed Not Occupied");
+    }
+
+    vTaskDelay(60000 / portTICK_PERIOD_MS);  // Wait 1 minute
+  }
+}
+
+// Function to connect to WiFi
+void connectToWiFi() {
+  int attempts = 0;
+  const int maxAttempts = 10;  // Maximum retry attempts
+  Serial.print("Attempting to connect to ");
+  Serial.println(ssid);
+
+  while (WiFi.status() != WL_CONNECTED && attempts < maxAttempts) {
+    WiFi.begin(ssid, pass);
+    vTaskDelay(15000 / portTICK_PERIOD_MS);  // Wait for 15 seconds before retrying
+    Serial.print("Attempt: ");
+    Serial.println(attempts + 1);
+
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.println("Connected to WiFi!");
+      Serial.print("IP Address: ");
+      Serial.println(WiFi.localIP());
+      break;
+    }
+    attempts++;
+  }
+
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("Failed to connect to WiFi after several attempts.");
+  }
+}
+
+// Function to read sensor data
+void readSensors() {
+  // Read from DHT22 sensor
+  tempDHT = dht.readTemperature();
+  if (isnan(tempDHT)) {
+    Serial.println("Failed to read from DHT sensor!");
+    tempDHT = 0;
+  }
+
+  // Read from NTC thermistor
+  int analogValue = analogRead(NTC_PIN);
+  Serial.print("NTC Raw Analog Value: ");
+  Serial.println(analogValue);
+
+  if (analogValue == 0) {
+    Serial.println("NTC Thermistor disconnected or incorrect!");
+    tempNTC = -273.15;  // Set to absolute zero as error state
+  } else {
+    float resistance = (1023.0 / analogValue - 1) * R0;
+    tempNTC = 1 / (log(resistance / R0) / BETA + 1 / 298.15) - 273.15;
+  }
+
+  // Set LED states based on temperature
+  if (tempDHT > 38.0 || tempNTC > 38.0) {
+    digitalWrite(LED_ORANGE, HIGH);
+    digitalWrite(LED_RED, LOW);
+  } else {
+    digitalWrite(LED_ORANGE, LOW);
+    digitalWrite(LED_RED, HIGH);
+  }
+
+  logToSerial();
+}
+
+// Function to log data to Serial Monitor
+void logToSerial() {
+  Serial.println("------ Bed Monitoring ------");
+  Serial.print("DHT22 Temp: ");
+  Serial.print(tempDHT);
+  Serial.println(" °C");
+
+  Serial.print("NTC Temp: ");
+  Serial.print(tempNTC);
+  Serial.println(" °C");
+
+  Serial.print("Orange LED: ");
+  Serial.println(digitalRead(LED_ORANGE) ? "ON" : "OFF");
+
+  Serial.print("Red LED: ");
+  Serial.println(digitalRead(LED_RED) ? "ON" : "OFF");
+}
